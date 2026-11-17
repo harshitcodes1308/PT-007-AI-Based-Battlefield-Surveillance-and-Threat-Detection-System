@@ -64,6 +64,20 @@ def annotate_frame(frame, detections: list[Detection]):
     return annotated
 
 
+def save_event_snapshot(annotated_frame, snapshot_dir: Path, event_type: str, track_id: int, frame_index: int) -> Path | None:
+    """Save annotated frame as a JPEG snapshot. Returns absolute path or None on failure."""
+    try:
+        snapshot_dir.mkdir(parents=True, exist_ok=True)
+        filename = f"{event_type}_track_{track_id}_frame_{frame_index}.jpg"
+        abs_path = snapshot_dir / filename
+        success = cv2.imwrite(str(abs_path), annotated_frame)
+        if not success:
+            return None
+        return abs_path
+    except Exception:
+        return None
+
+
 class VideoProcessor:
     def __init__(self, detector: Detector) -> None:
         self.detector = detector
@@ -80,6 +94,7 @@ class VideoProcessor:
         event_store=None,
         job_id: str = "",
         max_frames: int | None = None,
+        snapshot_dir: Path | None = None,
     ) -> ProcessingResult:
         capture = cv2.VideoCapture(str(input_path))
         if not capture.isOpened():
@@ -101,6 +116,10 @@ class VideoProcessor:
         tracker = CentroidTracker(max_distance=max(width, height) * 0.12)
         zone_state: dict[int, dict] = {}
         bounds = zone_bounds(width, height, zone)
+        # Snapshot directory is repo-relative: data/event_snapshots/<job_id>/
+        project_root = Path(__file__).resolve().parent
+        job_key = job_id if job_id else "default"
+        snap_base = snapshot_dir if snapshot_dir is not None else project_root / "data" / "event_snapshots" / job_key
         start_time = perf_counter()
         frame_index = 0
         try:
@@ -114,6 +133,7 @@ class VideoProcessor:
                 annotated = annotate_frame(frame, detections)
                 if monitor_zone:
                     inside = inspect_zone(detections, bounds)
+                    draw_zone(annotated, bounds, bool(inside))
                     inside_ids = {item.track_id for item in inside if item.track_id is not None}
                     for item in detections:
                         if item.track_id is None:
@@ -126,7 +146,21 @@ class VideoProcessor:
                             if not state["entry_sent"]:
                                 event = {"timestamp_seconds": round(now, 3), "frame_index": frame_index, "event_type": "zone_entry", "object_class": item.class_name, "track_id": item.track_id, "review_status": "pending", "job_id": job_id}
                                 if event_store:
-                                    event["event_id"] = event_store.add(event)
+                                    event_id, is_new = event_store.add(event)
+                                    event["event_id"] = event_id
+                                    if is_new and job_id:
+                                        snap_abs = save_event_snapshot(annotated, snap_base, event["event_type"], item.track_id, frame_index)
+                                        if snap_abs is not None:
+                                            try:
+                                                snap_rel = str(snap_abs.relative_to(project_root)).replace("\\", "/")
+                                            except ValueError:
+                                                snap_rel = str(snap_abs)
+                                            event["snapshot_path"] = snap_rel
+                                            event_store.set_snapshot_path(event_id, snap_rel)
+                                        else:
+                                            event["snapshot_path"] = None
+                                    else:
+                                        event["snapshot_path"] = None
                                 events.append(event)
                                 state["entry_sent"] = True
                         elif not is_inside:
@@ -135,10 +169,23 @@ class VideoProcessor:
                         if is_inside and state["entered_at"] is not None and not state["prolonged_sent"] and now - state["entered_at"] >= prolonged_presence_seconds:
                             event = {"timestamp_seconds": round(now, 3), "frame_index": frame_index, "event_type": "prolonged_presence", "object_class": item.class_name, "track_id": item.track_id, "review_status": "pending", "job_id": job_id}
                             if event_store:
-                                event["event_id"] = event_store.add(event)
+                                event_id, is_new = event_store.add(event)
+                                event["event_id"] = event_id
+                                if is_new and job_id:
+                                    snap_abs = save_event_snapshot(annotated, snap_base, event["event_type"], item.track_id, frame_index)
+                                    if snap_abs is not None:
+                                        try:
+                                            snap_rel = str(snap_abs.relative_to(project_root)).replace("\\", "/")
+                                        except ValueError:
+                                            snap_rel = str(snap_abs)
+                                        event["snapshot_path"] = snap_rel
+                                        event_store.set_snapshot_path(event_id, snap_rel)
+                                    else:
+                                        event["snapshot_path"] = None
+                                else:
+                                    event["snapshot_path"] = None
                             events.append(event)
                             state["prolonged_sent"] = True
-                    draw_zone(annotated, bounds, bool(inside))
                 writer.write(annotated)
                 for item in detections:
                     rows.append({
@@ -155,7 +202,7 @@ class VideoProcessor:
 
         elapsed = max(perf_counter() - start_time, 1e-9)
         events_path = output_dir / "events.csv"
-        pd.DataFrame(events, columns=["event_id", "timestamp_seconds", "frame_index", "event_type", "object_class", "track_id", "review_status", "job_id"]).to_csv(events_path, index=False)
+        pd.DataFrame(events, columns=["event_id", "timestamp_seconds", "frame_index", "event_type", "object_class", "track_id", "review_status", "job_id", "snapshot_path"]).to_csv(events_path, index=False)
         pd.DataFrame(rows, columns=["timestamp_seconds", "frame_index", "class", "confidence", "x1", "y1", "x2", "y2", "track_id"]).to_csv(csv_path, index=False)
         class_counts = Counter(event["object_class"] for event in events)
         return ProcessingResult(video_path, csv_path, total_frames, frame_index, len(rows), fps, codec, codec in {"avc1", "H264"}, events_path, len(events), frame_index / elapsed, len(tracker.seen_track_ids), dict(class_counts))

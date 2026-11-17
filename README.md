@@ -31,6 +31,7 @@ PT-007 turns an uploaded video into a reviewable analysis package. It detects su
 | Human review | Stores events in SQLite with pending or acknowledged status |
 | Evidence export | Produces annotated MP4, detection CSV, and event-history CSV |
 | Hardware support | Uses Apple MPS when available and falls back to CPU |
+| Event snapshots | Saves annotated frames for zone events; shown in the operator gallery |
 
 ## Why this project exists
 
@@ -49,9 +50,11 @@ flowchart LR
     E --> F[Configurable zone analysis]
     F --> G[Event deduplication]
     G --> H[(SQLite event history)]
+    G --> S[Event snapshot JPEGs]
     E --> I[Annotated video writer]
     E --> J[Detection CSV]
     H --> K[Review queue and CSV export]
+    S --> L[Event Snapshot Gallery]
 ```
 
 The UI exposes the confidence threshold, horizontal and vertical zone bounds, and prolonged-presence duration. Processing happens locally, one frame at a time.
@@ -81,6 +84,12 @@ Each yellow label contains the detected class, temporary track ID, and detection
 Zone events are persisted with a stable database ID, creation timestamp, video timestamp, frame index, track ID, class, event type, and review status.
 
 ![Persistent operator review queue with zone events](docs/images/operator-review-queue.png)
+
+### 5. Event Snapshot Gallery
+
+When a `zone_entry` or `prolonged_presence` event is generated, the annotated frame is saved as a JPEG under `data/event_snapshots/<job_id>/`. The operator review interface displays these snapshots in a two-column gallery with metadata and per-image download buttons.
+
+> [!NOTE] Snapshots persist across Streamlit restarts and are retrieved from the SQLite event history. Each snapshot represents a model-generated observation of geometric zone activity and requires human review before any operational use.
 
 ## Architecture
 
@@ -234,6 +243,7 @@ flowchart LR
 | `object_class` | Detected object category |
 | `event_type` | `zone_entry` or `prolonged_presence` |
 | `review_status` | `pending` or `acknowledged` |
+| `snapshot_path` | Repository-relative path to the annotated frame JPG, or null if unavailable |
 
 Persistent history is stored in `data/events.sqlite`. Temporary uploads and generated job outputs are written below `runtime/` and are excluded from Git.
 
@@ -252,7 +262,8 @@ Persistent history is stored in `data/events.sqlite`. Temporary uploads and gene
 ├── docs/
 │   └── images/            Demonstration and result screenshots
 ├── data/
-│   └── events.sqlite      Local persistent history, created automatically
+│   ├── events.sqlite      Local persistent history, created automatically
+│   └── event_snapshots/   Annotated frame captures for zone events (created automatically)
 ├── requirements.txt
 └── README.md
 ```
@@ -301,6 +312,7 @@ SQLite gives the review queue durable history without running a separate databas
 - The pretrained COCO model may miss small aerial objects because no VisDrone-specific fine-tuning has been performed.
 - H.264 output depends on the codecs available to the local OpenCV build. The application falls back to `mp4v` when required.
 - No accuracy, precision, recall, or threat-detection claims are made without a labeled evaluation dataset.
+- Snapshots are model-generated observations of geometric zone activity. They do not constitute verified evidence of threat or intent, and require human review before any operational use.
 
 ## Future improvements
 
@@ -310,7 +322,7 @@ flowchart LR
     A --> C[VisDrone fine-tuning]
     A --> D[Ground-truth evaluation]
     A --> E[Polygon zones]
-    A --> F[Per-event frame snapshots]
+    A --> F[Per-event frame snapshots ✓]
 ```
 
 These extensions should preserve the same principle used by the current system: model outputs remain reviewable observations, and final interpretation belongs to a human operator.

@@ -20,7 +20,7 @@ DATA_DIR = ROOT / "data"
 EVENT_DATABASE = DATA_DIR / "events.sqlite"
 
 
-def render_review_queue(store: EventStore) -> None:
+def render_review_queue(store: EventStore) -> str | None:
     """Render durable history on every Streamlit run, including application startup."""
     st.subheader("Operator review queue")
     job_options = ["All video jobs", *store.job_ids()]
@@ -29,7 +29,7 @@ def render_review_queue(store: EventStore) -> None:
     event_data = pd.DataFrame(store.list(job_id))
     if event_data.empty:
         st.info("No persisted reviewable activity events yet.")
-        return
+        return job_id
     pending_ids = event_data.loc[event_data["review_status"] == "pending", "id"].tolist()
     if pending_ids and st.button("Acknowledge all pending events", key="acknowledge_pending_events"):
         store.acknowledge([int(item) for item in pending_ids])
@@ -45,6 +45,47 @@ def render_review_queue(store: EventStore) -> None:
         key="download_event_history",
     )
     st.caption("Events are simulated zone observations attached to temporary tracking IDs. They are not confirmed threats or identity claims.")
+    return job_id
+
+def render_snapshot_gallery(store: EventStore, root: Path, job_id: str | None = None) -> None:
+    """Show annotated frame snapshots for zone events, respecting the selected video-job filter."""
+    st.subheader("Event Snapshot Gallery")
+    if job_id is None and "event_history_job" in st.session_state:
+        selected_job = st.session_state["event_history_job"]
+        job_id = None if selected_job == "All video jobs" else selected_job
+    events = store.list(job_id)
+    snapshot_events = [e for e in events if e.get("snapshot_path")]
+    if not snapshot_events:
+        st.info("No event snapshots available yet. Run analysis with zone monitoring enabled to generate snapshots.")
+        return
+    cols = st.columns(2)
+    for idx, event in enumerate(snapshot_events):
+        col = cols[idx % 2]
+        with col:
+            snap_path = root / event["snapshot_path"]
+            st.markdown(f"**#{event['id']} · {event['event_type'].replace('_', ' ').title()}**")
+            st.caption(
+                f"Class: {event['object_class']} · Track ID: {event['track_id']} · "
+                f"Time: {event['video_timestamp_seconds']:.2f}s · Status: {event['review_status']}"
+            )
+            if snap_path.exists():
+                try:
+                    st.image(str(snap_path), use_container_width=True)
+                    with open(snap_path, "rb") as fh:
+                        st.download_button(
+                            f"Download snapshot #{event['id']}",
+                            fh.read(),
+                            file_name=snap_path.name,
+                            mime="image/jpeg",
+                            key=f"dl_snap_{event['id']}",
+                        )
+                except Exception as exc:
+                    st.warning(f"Could not load snapshot #{event['id']}: {exc}")
+            else:
+                st.warning(f"Snapshot file not found: {event['snapshot_path']}")
+            st.divider()
+    st.caption("Snapshots are model-generated observations of zone activity and require human review before any operational use.")
+
 
 st.set_page_config(page_title="PT-007 | Surveillance", page_icon="◉", layout="wide")
 st.markdown("""<style>
@@ -133,4 +174,5 @@ if upload:
 else:
     frame_slot.info("Upload MP4, MOV, or AVI footage to begin live frame annotation.")
 
-render_review_queue(store)
+selected_job_id = render_review_queue(store)
+render_snapshot_gallery(store, ROOT, selected_job_id)

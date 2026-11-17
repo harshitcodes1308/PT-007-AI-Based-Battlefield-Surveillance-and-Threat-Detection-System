@@ -32,7 +32,16 @@ with tempfile.TemporaryDirectory() as temp:
         writer.write(np.zeros((48, 64, 3), dtype=np.uint8))
     writer.release()
     store = EventStore(root / "events.sqlite")
-    result = VideoProcessor(StubDetector()).process(source, root / "out", 0.4, zone=(0.2, 0.2, 0.8, 0.8), prolonged_presence_seconds=0.5, event_store=store, job_id="smoke")
+    result = VideoProcessor(StubDetector()).process(
+        source,
+        root / "out",
+        0.4,
+        zone=(0.2, 0.2, 0.8, 0.8),
+        prolonged_presence_seconds=0.5,
+        event_store=store,
+        job_id="smoke",
+        snapshot_dir=root / "snapshots" / "smoke",
+    )
     assert result.processed_frames == 12
     assert result.frame_level_detections == 12
     assert result.unique_tracked_objects == 1
@@ -45,7 +54,8 @@ with tempfile.TemporaryDirectory() as temp:
     assert {event["review_status"] for event in EventStore(root / "events.sqlite").list("smoke")} == {"acknowledged"}
     # The same logical event must retain its database ID rather than duplicate on rerun.
     original_id = persisted[0]["id"]
-    duplicate_id = EventStore(root / "events.sqlite").add({"job_id": "smoke", "timestamp_seconds": persisted[0]["video_timestamp_seconds"], "frame_index": persisted[0]["frame_index"], "track_id": persisted[0]["track_id"], "object_class": persisted[0]["object_class"], "event_type": persisted[0]["event_type"]})
+    duplicate_id, duplicate_is_new = EventStore(root / "events.sqlite").add({"job_id": "smoke", "timestamp_seconds": persisted[0]["video_timestamp_seconds"], "frame_index": persisted[0]["frame_index"], "track_id": persisted[0]["track_id"], "object_class": persisted[0]["object_class"], "event_type": persisted[0]["event_type"]})
     assert duplicate_id == original_id
+    assert not duplicate_is_new
     assert result.csv_file.exists() and result.annotated_video.exists()
 print("PT-007 smoke test passed")

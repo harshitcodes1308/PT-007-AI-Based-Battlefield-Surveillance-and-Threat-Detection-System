@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -22,9 +23,15 @@ class EventStore:
                     track_id INTEGER NOT NULL,
                     object_class TEXT NOT NULL,
                     event_type TEXT NOT NULL,
-                    review_status TEXT NOT NULL DEFAULT 'pending'
+                    review_status TEXT NOT NULL DEFAULT 'pending',
+                    snapshot_path TEXT
                 )
             """)
+            # Automatic schema migration: add snapshot_path to existing databases.
+            cols = [row[1] for row in connection.execute("PRAGMA table_info(events)").fetchall()]
+            if "snapshot_path" not in cols:
+                connection.execute("ALTER TABLE events ADD COLUMN snapshot_path TEXT")
+            connection.commit()
 
     def migrate_from(self, legacy_database_path: Path) -> int:
         """Copy legacy runtime history into this durable store without deleting it."""
@@ -56,10 +63,17 @@ class EventStore:
             connection.commit()
         return copied
 
+    @contextmanager
     def _connect(self):
-        return sqlite3.connect(self.database_path)
+        connection = sqlite3.connect(self.database_path)
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
-    def add(self, event: dict) -> int:
+    def add(self, event: dict) -> tuple[int, bool]:
+        """Insert event if not duplicate. Returns (event_id, is_new)."""
         created_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
         with self._connect() as connection:
             existing = connection.execute(
@@ -67,19 +81,29 @@ class EventStore:
                 (event["job_id"], event["frame_index"], event["track_id"], event["event_type"]),
             ).fetchone()
             if existing is not None:
-                return int(existing[0])
+                return int(existing[0]), False
             cursor = connection.execute(
                 """INSERT INTO events
-                (job_id, created_at, video_timestamp_seconds, frame_index, track_id, object_class, event_type, review_status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')""",
+                (job_id, created_at, video_timestamp_seconds, frame_index, track_id, object_class, event_type, review_status, snapshot_path)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)""",
                 (event["job_id"], created_at, event["timestamp_seconds"], event["frame_index"],
-                 event["track_id"], event["object_class"], event["event_type"]),
+                 event["track_id"], event["object_class"], event["event_type"],
+                 event.get("snapshot_path")),
             )
             connection.commit()
-            return int(cursor.lastrowid)
+            return int(cursor.lastrowid), True
+
+    def set_snapshot_path(self, event_id: int, snapshot_path: str) -> None:
+        """Update the snapshot_path for an already-inserted event."""
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE events SET snapshot_path = ? WHERE id = ?",
+                (snapshot_path, event_id),
+            )
+            connection.commit()
 
     def list(self, job_id: str | None = None) -> list[dict]:
-        query = "SELECT id, created_at, video_timestamp_seconds, frame_index, track_id, object_class, event_type, review_status FROM events"
+        query = "SELECT id, job_id, created_at, video_timestamp_seconds, frame_index, track_id, object_class, event_type, review_status, snapshot_path FROM events"
         parameters: tuple = ()
         if job_id:
             query += " WHERE job_id = ?"
